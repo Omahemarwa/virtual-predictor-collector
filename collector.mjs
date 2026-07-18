@@ -21,7 +21,6 @@ const LEAGUES = [
 
 const DASHBOARD_URL = 'https://virtualpredictor-production.up.railway.app/data';
 
-const REDIS_URL = process.env.REDIS_URL || `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`;
 const REDIS_KEY_PREFIX = 'predictor:';
 
 const PREDICTIONS_REDIS_KEY = REDIS_KEY_PREFIX + 'predictions:all';
@@ -33,12 +32,17 @@ let rescanMutex = false;
 let redisClient = null;
 
 async function connectRedis() {
+  const host = process.env.REDIS_HOST;
+  if (!host) { log('Redis not configured — skipping'); return; }
   try {
     const url = process.env.REDIS_PASSWORD
-      ? `redis://:${encodeURIComponent(process.env.REDIS_PASSWORD)}@${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`
-      : REDIS_URL;
-    redisClient = createClient({ url });
-    redisClient.on('error', e => log(`Redis error: ${e.message}`));
+      ? `redis://:${encodeURIComponent(process.env.REDIS_PASSWORD)}@${host}:${process.env.REDIS_PORT || 6379}`
+      : `redis://${host}:${process.env.REDIS_PORT || 6379}`;
+    redisClient = createClient({
+      url,
+      socket: { reconnectStrategy: () => false }
+    });
+    redisClient.on('error', () => {});
     await redisClient.connect();
     log('Redis connected');
   } catch (e) {
