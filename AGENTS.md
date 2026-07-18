@@ -27,6 +27,22 @@ Single Node.js service that:
 2. `?virtualTab=upcoming` → upcoming matches
 3. `?virtualTab=live` → current results (load after upcoming, otherwise header may render empty)
 
+## Redis
+
+Predictions are stored in Redis **in addition to CSV** for live access by other services.
+
+**Environment Variables:**
+| Var | Description | Default |
+|---|---|---|
+| `REDIS_HOST` | Redis hostname | `localhost` |
+| `REDIS_PORT` | Redis port | `6379` |
+| `REDIS_PASSWORD` | Redis password (optional) | none |
+| `REDIS_URL` | Full Redis URL (overrides HOST+PORT) | `redis://localhost:6379` |
+
+**Redis Key:** `predictor:predictions:all` → Redis List where each element is a CSV row string (`season_id,matchday,league,row,home_team,away_team,market,pct,collected_at`)
+
+Redis connection failures are non-fatal — the collector continues writing to CSV normally.
+
 ## CSV Formats
 
 ### `results.csv`
@@ -194,7 +210,8 @@ If hasScores is true but no score line follows → skip (match hasn't finished y
 1. `git push` to `Omahemarwa/virtual-predictor-collector`
 2. Railway: New Project → Deploy from GitHub repo
 3. Add volume at `/app/data` (persistent storage)
-4. Deploy — auto-starts immediately
+4. **Set env vars** → `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`
+5. Deploy — auto-starts immediately
 
 ## Start Execution Now
 All requirements finalized. Build `collector.mjs` with the spec above, update all supporting files, and commit.

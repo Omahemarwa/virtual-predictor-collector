@@ -2,6 +2,7 @@ import { firefox } from 'playwright';
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
+import { createClient } from 'redis';
 
 const DATA_DIR = '/app/data';
 const RESULTS_CSV = path.join(DATA_DIR, 'results.csv');
@@ -20,9 +21,31 @@ const LEAGUES = [
 
 const DASHBOARD_URL = 'https://virtualpredictor-production.up.railway.app/data';
 
+const REDIS_URL = process.env.REDIS_URL || `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`;
+const REDIS_KEY_PREFIX = 'predictor:';
+
+const PREDICTIONS_REDIS_KEY = REDIS_KEY_PREFIX + 'predictions:all';
+
 let currentSeasonId = null;
 let currentMatchday = null;
 let rescanMutex = false;
+
+let redisClient = null;
+
+async function connectRedis() {
+  try {
+    const url = process.env.REDIS_PASSWORD
+      ? `redis://:${encodeURIComponent(process.env.REDIS_PASSWORD)}@${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`
+      : REDIS_URL;
+    redisClient = createClient({ url });
+    redisClient.on('error', e => log(`Redis error: ${e.message}`));
+    await redisClient.connect();
+    log('Redis connected');
+  } catch (e) {
+    log(`Redis connection failed (non-fatal): ${e.message}`);
+    redisClient = null;
+  }
+}
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
@@ -308,6 +331,16 @@ async function savePredictions(predictions) {
   const hn = !fs.existsSync(PREDICTIONS_CSV) || fs.readFileSync(PREDICTIONS_CSV, 'utf-8').trim().length === 0;
   fs.appendFileSync(PREDICTIONS_CSV, (hn ? PREDICTIONS_HEADER + '\n' : '') + newRows.join('\n') + '\n');
   log(`Predictions: +${newRows.length} rows saved`);
+
+  // Also push to Redis if connected
+  if (redisClient && redisClient.isOpen) {
+    try {
+      const redisRows = newRows.map(r => `${PREDICTIONS_HEADER}\n${r}`);
+      await redisClient.rPush(PREDICTIONS_REDIS_KEY, redisRows);
+    } catch (e) {
+      log(`Redis save error: ${e.message}`);
+    }
+  }
 }
 
 async function saveResults(rows) {
@@ -669,8 +702,13 @@ if (args.includes('--serve')) {
   const port = parseInt(process.env.PORT || args[idx + 1] || '3000', 10);
   startServer(port);
 
-  // Initial collect
-  collectAll().catch(e => log('Collect error: ' + e.message));
+  // Connect to Redis (non-blocking, graceful fallback)
+  connectRedis().then(() => {
+    // Initial collect after Redis is ready
+    collectAll().catch(e => log('Collect error: ' + e.message));
+  }).catch(() => {
+    collectAll().catch(e => log('Collect error: ' + e.message));
+  });
 
   // 10-second prediction polling
   setInterval(async () => {

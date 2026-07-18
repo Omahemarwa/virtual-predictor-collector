@@ -12,6 +12,7 @@
     "check": "node --check collector.mjs"
   },
   "dependencies": {
-    "playwright": "1.61.1"
+    "playwright": "1.61.1",
+    "redis": "^6.1.0"
   }
 }
