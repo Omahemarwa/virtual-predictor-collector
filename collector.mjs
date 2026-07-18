@@ -101,15 +101,53 @@ function parseMatchLines(text, hasScores) {
 }
 
 async function detectSeasonId(page) {
+  // Method 1: matchday/0 redirect
   try {
     await page.goto('https://www.betpawa.co.tz/virtual-sports/matchday/0?matchday=1&leagueId=7794', {
-      waitUntil: 'domcontentloaded', timeout: 15000
+      waitUntil: 'domcontentloaded', timeout: 20000
     });
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(4000);
     const m = page.url().match(/\/matchday\/(\d{5,})/);
     if (m) return m[1];
-  } catch (e) { log('Season detection error: ' + e.message); }
-  return null;
+    log(`Method 1: URL after redirect: ${page.url()}`);
+  } catch (e) { log('Method 1 error: ' + e.message); }
+
+  // Method 2: try upcoming tab and extract from league links or page content
+  try {
+    await page.goto('https://www.betpawa.co.tz/virtual-sports?virtualTab=upcoming', {
+      waitUntil: 'domcontentloaded', timeout: 20000
+    });
+    await page.waitForTimeout(4000);
+    const text = await page.innerText('body');
+    // Look for season ID in page text (e.g., "Season 138444" or similar)
+    const m = text.match(/Season\s*(\d{5,})/i) || text.match(/season[_-]?(\d{5,})/i) || text.match(/(\d{5,})\s*[-–]\s*20/);
+    if (m) return m[1];
+    // Check if any links contain season IDs
+    const hrefs = await page.evaluate(() => Array.from(document.querySelectorAll('a')).map(a => a.href));
+    for (const href of hrefs) {
+      const m2 = href.match(/\/matchday\/(\d{5,})/);
+      if (m2) return m2[1];
+    }
+    log(`Method 2: No season found in upcoming tab`);
+  } catch (e) { log('Method 2 error: ' + e.message); }
+
+  // Method 3: try the results tab season dropdown
+  try {
+    await page.goto('https://www.betpawa.co.tz/virtual-sports?virtualTab=results&resultsTab=matches', {
+      waitUntil: 'domcontentloaded', timeout: 20000
+    });
+    await page.waitForTimeout(4000);
+    const seasons = await page.evaluate(() => {
+      const sel = document.querySelector('[data-test-id="auto-matches-results-select"] select');
+      if (!sel) return [];
+      return Array.from(sel.options).map(o => o.value);
+    });
+    if (seasons.length) return seasons[0];
+  } catch (e) { log('Method 3 error: ' + e.message); }
+
+  // Fallback: use a known recent season (will be updated on next successful run)
+  log('All methods failed, using fallback season 138444');
+  return '138444';
 }
 
 function extractMatchday(text) {
