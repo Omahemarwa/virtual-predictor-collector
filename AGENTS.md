@@ -30,10 +30,11 @@ Single Node.js service that:
 
 ### `results.csv`
 ```
-season_id,matchday,league,home_team,away_team,ft_home,ft_away
+season_id,matchday,league,row,home_team,away_team,ft_home,ft_away
 ```
 - **Save ALL English + Spanish matches shown on Live** — regardless of whether they had predictions
 - Preserve team values exactly as betPawa displays them (3-letter codes)
+- `row` = row number the match appears in on the Live tab (1–10)
 
 ### `upcoming.csv` (NEW)
 ```
@@ -58,10 +59,10 @@ season_id,matchday,league,row,home_team,away_team,market,pct,collected_at
 
 ## Dedup + Update Rules
 
-| File | Key | On Change |
+| File | Dedup Key | On Change |
 |---|---|---|
-| `results.csv` | `season_id + matchday + league + home_team + away_team` | Overwrite score |
-| `upcoming.csv` | `season_id + matchday + league + row` | Overwrite teams |
+| `results.csv` | `season_id + matchday + row` | Overwrite row |
+| `upcoming.csv` | `season_id + matchday + row` | Overwrite row |
 | `predictions.csv` | **Always appends** — no dedup | Each 10s poll creates new rows with unique `collected_at` timestamp |
 
 Results and upcoming CSVs are overwritten entirely on each save (read → modify in memory → write).

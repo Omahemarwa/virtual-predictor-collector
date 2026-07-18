@@ -9,7 +9,7 @@ const UPCOMING_CSV = path.join(DATA_DIR, 'upcoming.csv');
 const PREDICTIONS_CSV = path.join(DATA_DIR, 'predictions.csv');
 const COLLECT_LOG = path.join(DATA_DIR, 'collect_log.txt');
 
-const RESULTS_HEADER = 'season_id,matchday,league,home_team,away_team,ft_home,ft_away';
+const RESULTS_HEADER = 'season_id,matchday,league,row,home_team,away_team,ft_home,ft_away';
 const UPCOMING_HEADER = 'season_id,matchday,league,row,home_team,away_team';
 const PREDICTIONS_HEADER = 'season_id,matchday,league,row,home_team,away_team,market,pct,collected_at';
 
@@ -57,12 +57,8 @@ function writeCSV(filePath, header, rows) {
   fs.writeFileSync(filePath, lines.join('\n') + '\n');
 }
 
-function getResultKey(row) {
-  return `${row.season_id}-${row.matchday}-${row.league}-${row.home_team}-${row.away_team}`;
-}
-
-function getUpcomingKey(row) {
-  return `${row.season_id}-${row.matchday}-${row.league}-${row.row}`;
+function getSeasonMDKey(row) {
+  return `${row.season_id}-${row.matchday}-${row.row}`;
 }
 
 function getPredictionKey(row) {
@@ -210,11 +206,13 @@ async function scrapeBetPawa(page, seasonId) {
       }
       const text = await page.innerText('body');
       const matches = parseMatchLines(text, true);
+      let row = 1;
       for (const m of matches) {
         liveResults.push({
           season_id: seasonId,
           matchday: currentMatchday || '',
           league,
+          row: row++,
           home_team: m.home,
           away_team: m.away,
           ft_home: m.ft_home,
@@ -260,8 +258,8 @@ async function saveResults(liveResults) {
   let updated = 0, added = 0;
 
   for (const r of liveResults) {
-    const key = getResultKey(r);
-    const existingIdx = existing.findIndex(x => getResultKey(x) === key);
+    const key = getSeasonMDKey(r);
+    const existingIdx = existing.findIndex(x => getSeasonMDKey(x) === key);
     if (existingIdx >= 0) {
       existing[existingIdx] = r;
       updated++;
@@ -280,8 +278,8 @@ async function saveUpcoming(upcomingMatches) {
   let updated = 0, added = 0;
 
   for (const m of upcomingMatches) {
-    const key = getUpcomingKey(m);
-    const existingIdx = existing.findIndex(x => getUpcomingKey(x) === key);
+    const key = getSeasonMDKey(m);
+    const existingIdx = existing.findIndex(x => getSeasonMDKey(x) === key);
     if (existingIdx >= 0) {
       existing[existingIdx] = m;
       updated++;
