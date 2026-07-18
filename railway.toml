@@ -1,0 +1,8 @@
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[[service]]
+name = "web"
+startCommand = "/entrypoint.sh node collector.mjs --serve"
+port = 8080
