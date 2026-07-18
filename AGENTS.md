@@ -12,15 +12,19 @@ Single Node.js service that:
 3. Saves all to CSVs with dedup + overwrite
 4. Serves a data viewer + health endpoint
 
-## 3 Data Sources
+## 4 Sources / Endpoints
 
-| Source | What | How Often |
+| Endpoint | What | How Often |
 |---|---|---|
-| `?virtualTab=upcoming` then `?virtualTab=live` | Results of just-finished matches | On startup + every timer transition |
-| `?virtualTab=upcoming` | Upcoming match listing (no scores) | Same as above |
-| `https://virtualpredictor-production.up.railway.app/data` | Current matchday predictions | Every **10 seconds** (lightweight HTTP) |
+| `https://www.betpawa.co.tz/virtual-sports?virtualTab=results` | **Detect season ID** from dropdown or page content | Startup + every 5 min re-scan |
+| `https://www.betpawa.co.tz/virtual-sports?virtualTab=upcoming` | **Upcoming matches** (team codes, no scores) | Startup + re-scan |
+| `https://www.betpawa.co.tz/virtual-sports?virtualTab=live` | **Current/recent results** — refreshed every ~5 min after timer ends | Startup + re-scan |
+| `https://virtualpredictor-production.up.railway.app/data` | **Predictions** for current matchday | Every **10 seconds** (lightweight HTTP) |
 
-**betPawa load order:** Always load Upcoming tab first, then activate Live tab. Opening `?virtualTab=live` directly sometimes renders header without match rows.
+**betPawa load order:**
+1. `?virtualTab=results` → detect season
+2. `?virtualTab=upcoming` → upcoming matches
+3. `?virtualTab=live` → current results (load after upcoming, otherwise header may render empty)
 
 ## CSV Formats
 
@@ -46,8 +50,9 @@ season_id,matchday,league,row,home_team,away_team,market,pct
 - `away_team` = `team2` from API
 
 ## Season ID Strategy
-- **Derive from metadata** — on startup, navigate to `/matchday/0?matchday=1&leagueId=7794` and extract season_id from the redirect URL. Keep it in memory.
-- The Live/Upcoming UI doesn't visibly display season_id, but the matchday/0 redirect always returns the current season.
+- **Derive from results tab** — on startup, navigate to `https://www.betpawa.co.tz/virtual-sports?virtualTab=results` and extract season_id from the season dropdown (`[data-test-id="auto-matches-results-select"] select`) or from page text/URL links.
+- **Fallback methods:** matchday/0 redirect, upcoming tab links.
+- **Last resort:** hardcoded fallback `138444`.
 - This preserves CSV compatibility with existing consumers.
 
 ## Dedup + Update Rules
@@ -65,10 +70,11 @@ All CSVs are **overwritten entirely** on each save (read → modify in memory �
 ```
 STARTUP:
   1. Start HTTP server
-  2. Detect season_id via matchday/0 redirect
-  3. Load Upcoming tab → activate Live tab → scrape both
-  4. Fetch predictions from API
-  5. Save all CSVs
+  2. Detect season_id via `?virtualTab=results`
+  3. Load Upcoming tab → scrape upcoming matches
+  4. Activate Live tab → scrape live results
+  5. Fetch predictions from API
+  6. Save all CSVs
 
 EVERY 10 SECONDS (lightweight, no browser):
   1. HTTP GET predictions endpoint
@@ -119,31 +125,36 @@ Auto-polls `/collect-log` every 2s on `/view/results` page. Hidden when log is e
 ### betPawa page scraper (Playwright Firefox)
 ```
 async function scrapeBetPawa(seasonId, page):
-  # 1. Upcoming tab first (required — live tab won't render correctly otherwise)
+  # ═══ RESULTS TAB — detect season ═══
+  # (season_id already detected by collectAll() before this call)
+
+  # ═══ UPCOMING TAB ═══
+  # Load first — live tab won't render correctly otherwise
   await page.goto('https://www.betpawa.co.tz/virtual-sports?virtualTab=upcoming', ...)
   await page.waitForTimeout(3000)
 
-  # 2. Switch to English league tab
-  click English league tab/button or navigate with leagueId param
+  # Switch to English league tab
+  click English league tab
   await page.waitForTimeout(1000)
   extract matchday from page text (regex: /Matchday\s*(\d+)/i)
   upcomingEnglish = parseMatchLines(await page.innerText('body'), hasScores=false)
 
-  # 3. Switch to Spanish league tab
+  # Switch to Spanish league tab
   click Spanish league tab
   await page.waitForTimeout(1000)
   upcomingSpanish = parseMatchLines(..., hasScores=false)
 
-  # 4. Now activate Live tab
+  # ═══ LIVE TAB ═══
+  # Activate Live — current/recent results (refreshed ~every 5 min)
   click Live tab control
   await page.waitForTimeout(3000)
 
-  # 5. English league on Live tab
+  # English league on Live tab
   click English league tab
   await page.waitForTimeout(1000)
   liveEnglish = parseMatchLines(await page.innerText('body'), hasScores=true)
 
-  # 6. Spanish league on Live tab
+  # Spanish league on Live tab
   click Spanish league tab
   await page.waitForTimeout(1000)
   liveSpanish = parseMatchLines(..., hasScores=true)
