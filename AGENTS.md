@@ -107,11 +107,13 @@ Prediction polling (10s) is INDEPENDENT and NEVER skipped.
 |---|---|
 | `GET /health` | `{"status":"ok"}` |
 | `GET /collect-log` | Plain text of collect_log.txt |
+| `GET /api/seasons` | Scrapes betPawa results tab, returns JSON array of `{value, label}` for season dropdown |
+| `GET /api/collect-range?season=138445&startMD=1&endMD=34&leagues=English,Spanish` | Launches Playwright, scrapes matchday pages for given season + MD range + leagues, saves to results.csv |
 | `GET /csv/results.csv` | Filtered + paginated results JSON |
 | `GET /csv/upcoming.csv` | Filtered + paginated upcoming JSON |
 | `GET /csv/predictions.csv` | Filtered + paginated predictions JSON |
 | `GET /view` | HTML index with links to all 3 viewers |
-| `GET /view/results` | HTML results viewer (filters + log panel) |
+| `GET /view/results` | HTML results viewer (filters + log panel + "Scrape Results" button with modal) |
 | `GET /view/upcoming` | HTML upcoming viewer |
 | `GET /view/predictions` | HTML predictions viewer |
 
