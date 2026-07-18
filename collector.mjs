@@ -389,6 +389,76 @@ function csvEndpoint(filePath, header) {
   };
 }
 
+async function apiSeasons() {
+  const browser = await firefox.launch({ headless: true });
+  const page = await browser.newPage({ userAgent: 'Mozilla/5.0' });
+  try {
+    await page.goto('https://www.betpawa.co.tz/virtual-sports?virtualTab=results&resultsTab=matches', {
+      waitUntil: 'domcontentloaded', timeout: 20000
+    });
+    await page.waitForTimeout(4000);
+    const seasons = await page.evaluate(() => {
+      const sel = document.evaluate(
+        '/html/body/div[1]/div/div[5]/section[1]/div[2]/div/div[3]/section/div[2]/div[2]/div[2]/div/div[1]/div/select',
+        document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+      ).singleNodeValue;
+      if (!sel) return [];
+      return Array.from(sel.options).map(o => ({ value: o.value, label: o.textContent.trim() }));
+    });
+    return seasons;
+  } finally {
+    await browser.close();
+  }
+}
+
+async function collectRange(season, startMD, endMD, leagues) {
+  log(`=== RANGE COLLECT: season ${season} MD ${startMD}-${endMD} leagues=${leagues.join(',')} ===`);
+  const browser = await firefox.launch({ headless: true });
+  const page = await browser.newPage({ userAgent: 'Mozilla/5.0' });
+  let total = 0;
+  try {
+    for (let md = startMD; md <= endMD; md++) {
+      for (const { name: league, leagueId } of LEAGUES) {
+        if (!leagues.includes(league)) continue;
+        try {
+          await page.goto(`https://www.betpawa.co.tz/virtual-sports/matchday/${season}?matchday=${md}&leagueId=${leagueId}`, {
+            waitUntil: 'domcontentloaded', timeout: 15000
+          });
+          await page.waitForTimeout(2000);
+          const matches = parseMatchLines(await page.innerText('body'), true);
+          if (matches.length === 0) continue;
+          const rows = [];
+          let rowNum = 1;
+          for (const m of matches) {
+            rows.push({
+              season_id: season, matchday: md, league,
+              row: rowNum++,
+              home_team: m.home, away_team: m.away,
+              ft_home: m.ft_home, ft_away: m.ft_away
+            });
+          }
+          const { rows: existing } = readCSV(RESULTS_CSV, RESULTS_HEADER);
+          const keySet = new Set(existing.map(getSeasonMDKey));
+          let added = 0;
+          for (const r of rows) {
+            const key = getSeasonMDKey(r);
+            const idx = existing.findIndex(x => getSeasonMDKey(x) === key);
+            if (idx >= 0) { existing[idx] = r; } else { existing.push(r); added++; }
+          }
+          writeCSV(RESULTS_CSV, RESULTS_HEADER, existing);
+          total += rows.length;
+          log(`  ${league} ${season} MD ${md}: ${rows.length} results`);
+        } catch (e) {
+          log(`  ${league} ${season} MD ${md} error: ${e.message}`);
+        }
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+  log(`=== RANGE COLLECT DONE: ${total} total ===`);
+}
+
 function startServer(port) {
   const getResults = csvEndpoint(RESULTS_CSV, RESULTS_HEADER);
   const getUpcoming = csvEndpoint(UPCOMING_CSV, UPCOMING_HEADER);
@@ -408,6 +478,33 @@ function startServer(port) {
     if (p === '/collect-log') {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       try { res.end(fs.readFileSync(COLLECT_LOG, 'utf-8')); } catch (e) { res.end(''); }
+      return;
+    }
+
+    if (p === '/api/seasons') {
+      apiSeasons().then(seasons => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(seasons));
+      }).catch(e => {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: e.message }));
+      });
+      return;
+    }
+
+    if (p === '/api/collect-range') {
+      const season = url.searchParams.get('season');
+      const startMD = parseInt(url.searchParams.get('startMD')) || 1;
+      const endMD = parseInt(url.searchParams.get('endMD')) || 34;
+      const leagues = (url.searchParams.get('leagues') || 'English,Spanish').split(',');
+      if (!season) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'season param required' }));
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'started', season, startMD, endMD, leagues }));
+      collectRange(season, startMD, endMD, leagues).catch(e => log(`Range collect error: ${e.message}`));
       return;
     }
 
@@ -456,8 +553,21 @@ tr:hover td{background:#161b22}
 .log-panel.show{display:block}
 .log-header{background:#161b22;padding:8px 12px;border-bottom:1px solid #30363d;font-size:12px;font-weight:600;color:#f0f6fc}
 .log-body{font-family:monospace;font-size:11px;color:#8b949e;padding:8px 12px;white-space:pre-wrap;line-height:1.6}
+.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:999}
+.modal.show{display:flex;align-items:center;justify-content:center}
+.modal-box{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:24px;width:380px;max-width:90%}
+.modal-box h3{margin:0 0 16px;color:#f0f6fc;font-size:16px}
+.modal-box label{display:block;margin:10px 0 4px;font-size:12px;color:#8b949e}
+.modal-box select,.modal-box input{width:100%;padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;font-size:13px;margin-bottom:4px}
+.modal-box .check-group{display:flex;gap:16px;margin:10px 0}
+.modal-box .check-group label{display:flex;align-items:center;gap:6px;font-size:13px;color:#c9d1d9;margin:0}
+.modal-actions{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
+.modal-actions .btn-cancel{background:#30363d;color:#c9d1d9}
+.modal-actions .btn-cancel:hover{background:#484f58}
+.scrape-btn{background:#1f6feb;color:#fff;padding:4px 12px;border:none;border-radius:4px;cursor:pointer;font-size:11px;margin-left:auto}
+.scrape-btn:hover{background:#388bfd}
 </style></head><body>
-<div class="nav"><h2>${name.charAt(0).toUpperCase() + name.slice(1)}</h2><a href="/view">Tables</a></div>
+<div class="nav"><h2>${name.charAt(0).toUpperCase() + name.slice(1)}</h2><a href="/view">Tables</a>${isResults ? '<button class="scrape-btn" onclick="showModal()">Scrape Results</button>' : ''}</div>
 ${(isResults || isUpcoming) ? '<div class="filters"><input id="fSeason" placeholder="Season" size="8"><input id="fMD" placeholder="MD" size="4"><select id="fLeague"><option value="">All</option><option value="English">English</option><option value="Spanish">Spanish</option></select><button class="btn" onclick="applyF()">Apply</button><span class="clear" onclick="clearF()">Clear</span></div><div class="log-panel" id="logPanel"><div class="log-header">Collection Log</div><div class="log-body" id="logBody">Waiting for logs...</div></div>' : ''}
 <div class="stats" id="stats">Loading...</div>
 <div class="wrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
@@ -493,7 +603,37 @@ function load(o){off=o;
 if(document.getElementById('fSeason')){document.getElementById('fSeason').value=params.season_id||'';document.getElementById('fMD').value=params.matchday||'';document.getElementById('fLeague').value=params.league||''}
 load(0);
 ${(isResults || isUpcoming) ? 'setInterval(function(){fetch("/collect-log").then(function(r){return r.text()}).then(function(t){if(t){var b=document.getElementById("logBody");b.textContent=t;b.scrollTop=b.scrollHeight;document.getElementById("logPanel").classList.add("show")}}).catch(function(){})},2000);' : ''}
-</script></body></html>`);
+${isResults ? `
+function showModal(){document.getElementById("scrapeModal").classList.add("show");loadSeasons()}
+function closeModal(){document.getElementById("scrapeModal").classList.remove("show")}
+function loadSeasons(){
+  var sel=document.getElementById("sSeason");sel.innerHTML='<option>Loading...</option>';
+  fetch("/api/seasons").then(function(r){return r.json()}).then(function(d){
+    sel.innerHTML='';
+    for(var i=0;i<d.length;i++){
+      var o=document.createElement("option");o.value=d[i].value;o.textContent=d[i].label;sel.appendChild(o)
+    }
+  }).catch(function(){sel.innerHTML='<option>Error loading seasons</option>'})
+}
+function startScrape(){
+  var season=document.getElementById("sSeason").value;
+  var startMD=parseInt(document.getElementById("sStartMD").value)||1;
+  var endMD=parseInt(document.getElementById("sEndMD").value)||34;
+  var leagues=[];
+  if(document.getElementById("sEng").checked)leagues.push("English");
+  if(document.getElementById("sEsp").checked)leagues.push("Spanish");
+  if(!season||leagues.length===0)return;
+  fetch("/api/collect-range?season="+encodeURIComponent(season)+"&startMD="+startMD+"&endMD="+endMD+"&leagues="+encodeURIComponent(leagues.join(",")));
+  closeModal();
+}
+` : ''}</script>
+${isResults ? `<div class="modal" id="scrapeModal"><div class="modal-box"><h3>Scrape Results</h3>
+<label>Season</label><select id="sSeason"></select>
+<label>From Matchday</label><input id="sStartMD" type="number" min="1" max="34" value="1">
+<label>To Matchday</label><input id="sEndMD" type="number" min="1" max="34" value="34">
+<div class="check-group"><label><input id="sEng" type="checkbox" checked> English</label><label><input id="sEsp" type="checkbox" checked> Spanish</label></div>
+<div class="modal-actions"><button class="btn btn-cancel" onclick="closeModal()">Cancel</button><button class="btn" onclick="startScrape()">Start</button></div></div></div>` : ''}
+</body></html>`);
       return;
     }
 
