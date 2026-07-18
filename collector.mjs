@@ -336,13 +336,13 @@ async function savePredictions(predictions) {
   fs.appendFileSync(PREDICTIONS_CSV, (hn ? PREDICTIONS_HEADER + '\n' : '') + newRows.join('\n') + '\n');
   log(`Predictions: +${newRows.length} rows saved`);
 
-  // Also push to Redis if connected
+  // Also push to Redis if connected (non-fatal)
   if (redisClient && redisClient.isOpen) {
     try {
       const redisRows = newRows.map(r => `${PREDICTIONS_HEADER}\n${r}`);
       await redisClient.rPush(PREDICTIONS_REDIS_KEY, redisRows);
     } catch (e) {
-      log(`Redis save error: ${e.message}`);
+      // MISCONF = Redis can't persist (free tier) — silently ignore
     }
   }
 }
@@ -473,41 +473,46 @@ async function collectRange(season, startMD, endMD, leagues) {
   let total = 0;
   try {
     for (let md = startMD; md <= endMD; md++) {
-      let freshPage;
-      try { freshPage = await browser.newPage({ userAgent: 'Mozilla/5.0' }); } catch (e) { break; }
       for (const { name: league, leagueId } of LEAGUES) {
         if (!leagues.includes(league)) continue;
-        try {
-          await freshPage.goto(`https://www.betpawa.co.tz/virtual-sports/matchday/${season}?matchday=${md}&leagueId=${leagueId}`, {
-            waitUntil: 'domcontentloaded', timeout: 15000
-          });
-          await freshPage.waitForTimeout(2000);
-          const matches = parseMatchLines(await freshPage.innerText('body'), true);
-          if (matches.length === 0) continue;
-          const rows = [];
-          let rowNum = 1;
-          for (const m of matches) {
-            rows.push({
-              season_id: season, matchday: md, league,
-              row: rowNum++, home_team: m.home, away_team: m.away,
-              ft_home: m.ft_home, ft_away: m.ft_away
+        let success = false;
+        for (let attempt = 0; attempt < 3 && !success; attempt++) {
+          let freshPage;
+          try { freshPage = await browser.newPage({ userAgent: 'Mozilla/5.0' }); } catch (e) { break; }
+          try {
+            await freshPage.goto(`https://www.betpawa.co.tz/virtual-sports/matchday/${season}?matchday=${md}&leagueId=${leagueId}`, {
+              waitUntil: 'domcontentloaded', timeout: 15000
             });
+            await freshPage.waitForTimeout(2000);
+            const matches = parseMatchLines(await freshPage.innerText('body'), true);
+            if (matches.length === 0) { await freshPage.close().catch(() => {}); success = true; break; }
+            const rows = [];
+            let rowNum = 1;
+            for (const m of matches) {
+              rows.push({
+                season_id: season, matchday: md, league,
+                row: rowNum++, home_team: m.home, away_team: m.away,
+                ft_home: m.ft_home, ft_away: m.ft_away
+              });
+            }
+            const { rows: existing } = readCSV(RESULTS_CSV, RESULTS_HEADER);
+            let added = 0;
+            for (const r of rows) {
+              const key = getSeasonMDKey(r);
+              const idx = existing.findIndex(x => getSeasonMDKey(x) === key);
+              if (idx >= 0) { existing[idx] = r; } else { existing.push(r); added++; }
+            }
+            writeCSV(RESULTS_CSV, RESULTS_HEADER, existing);
+            total += rows.length;
+            log(`  ${league} ${season} MD ${md}: ${rows.length} results`);
+            success = true;
+          } catch (e) {
+            if (attempt < 2) log(`  ${league} ${season} MD ${md} retry ${attempt+1}: ${e.message}`);
+          } finally {
+            await freshPage.close().catch(() => {});
           }
-          const { rows: existing } = readCSV(RESULTS_CSV, RESULTS_HEADER);
-          let added = 0;
-          for (const r of rows) {
-            const key = getSeasonMDKey(r);
-            const idx = existing.findIndex(x => getSeasonMDKey(x) === key);
-            if (idx >= 0) { existing[idx] = r; } else { existing.push(r); added++; }
-          }
-          writeCSV(RESULTS_CSV, RESULTS_HEADER, existing);
-          total += rows.length;
-          log(`  ${league} ${season} MD ${md}: ${rows.length} results`);
-        } catch (e) {
-          log(`  ${league} ${season} MD ${md} error: ${e.message}`);
         }
       }
-      try { await freshPage.close(); } catch (e) {}
     }
   } finally {
     await browser.close();
