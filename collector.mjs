@@ -228,11 +228,17 @@ async function scrapeBetPawa(page, seasonId) {
   return { liveResults, upcomingMatches };
 }
 
-async function scrapeHistoricalResults(page, seasonId) {
+async function scrapeHistoricalResults(browser, seasonId) {
   const results = [];
   const latestSeason = parseInt(seasonId);
   const startSeason = 138439;
   log(`Historical results: scanning seasons ${startSeason} → ${latestSeason}`);
+
+  let page;
+  try { page = await browser.newPage({ userAgent: 'Mozilla/5.0' }); } catch (e) {
+    log('Failed to create page for historical scrape');
+    return results;
+  }
 
   for (let sid = startSeason; sid <= latestSeason; sid++) {
     const sidStr = String(sid);
@@ -247,14 +253,24 @@ async function scrapeHistoricalResults(page, seasonId) {
           });
           await page.waitForTimeout(2000);
           matches = parseMatchLines(await page.innerText('body'), true);
-        } catch (e) { continue; }
+        } catch (e) {
+          // Page crashed — recreate and retry this iteration
+          try { await page.close(); } catch (e2) {}
+          try { page = await browser.newPage({ userAgent: 'Mozilla/5.0' }); } catch (e2) { return results; }
+          try {
+            await page.goto(`https://www.betpawa.co.tz/virtual-sports/matchday/${sidStr}?matchday=${md}&leagueId=${leagueId}`, {
+              waitUntil: 'domcontentloaded', timeout: 15000
+            });
+            await page.waitForTimeout(2000);
+            matches = parseMatchLines(await page.innerText('body'), true);
+          } catch (e2) { continue; }
+        }
         if (matches.length === 0) continue;
         let row = 1;
         for (const m of matches) {
           results.push({
             season_id: sidStr, matchday: md, league,
-            row: row++,
-            home_team: m.home, away_team: m.away,
+            row: row++, home_team: m.home, away_team: m.away,
             ft_home: m.ft_home, ft_away: m.ft_away
           });
         }
@@ -265,6 +281,7 @@ async function scrapeHistoricalResults(page, seasonId) {
     }
     if (foundAny) log(`  Season ${sid}: historical scrape done`);
   }
+  try { await page.close(); } catch (e) {}
   log(`Historical results: ${results.length} total`);
   return results;
 }
@@ -351,7 +368,9 @@ async function collectAll() {
 
   // Scrape live + upcoming + historical
   const { liveResults, upcomingMatches } = await scrapeBetPawa(page, currentSeasonId);
-  const historicalResults = await scrapeHistoricalResults(page, currentSeasonId);
+  // Close live/upcoming page, create fresh ones inside historical scraper
+  await page.close();
+  const historicalResults = await scrapeHistoricalResults(browser, currentSeasonId);
   await browser.close();
 
   // Merge live + historical results
@@ -414,31 +433,30 @@ async function apiSeasons() {
 async function collectRange(season, startMD, endMD, leagues) {
   log(`=== RANGE COLLECT: season ${season} MD ${startMD}-${endMD} leagues=${leagues.join(',')} ===`);
   const browser = await firefox.launch({ headless: true });
-  const page = await browser.newPage({ userAgent: 'Mozilla/5.0' });
   let total = 0;
   try {
     for (let md = startMD; md <= endMD; md++) {
+      let freshPage;
+      try { freshPage = await browser.newPage({ userAgent: 'Mozilla/5.0' }); } catch (e) { break; }
       for (const { name: league, leagueId } of LEAGUES) {
         if (!leagues.includes(league)) continue;
         try {
-          await page.goto(`https://www.betpawa.co.tz/virtual-sports/matchday/${season}?matchday=${md}&leagueId=${leagueId}`, {
+          await freshPage.goto(`https://www.betpawa.co.tz/virtual-sports/matchday/${season}?matchday=${md}&leagueId=${leagueId}`, {
             waitUntil: 'domcontentloaded', timeout: 15000
           });
-          await page.waitForTimeout(2000);
-          const matches = parseMatchLines(await page.innerText('body'), true);
+          await freshPage.waitForTimeout(2000);
+          const matches = parseMatchLines(await freshPage.innerText('body'), true);
           if (matches.length === 0) continue;
           const rows = [];
           let rowNum = 1;
           for (const m of matches) {
             rows.push({
               season_id: season, matchday: md, league,
-              row: rowNum++,
-              home_team: m.home, away_team: m.away,
+              row: rowNum++, home_team: m.home, away_team: m.away,
               ft_home: m.ft_home, ft_away: m.ft_away
             });
           }
           const { rows: existing } = readCSV(RESULTS_CSV, RESULTS_HEADER);
-          const keySet = new Set(existing.map(getSeasonMDKey));
           let added = 0;
           for (const r of rows) {
             const key = getSeasonMDKey(r);
@@ -452,6 +470,7 @@ async function collectRange(season, startMD, endMD, leagues) {
           log(`  ${league} ${season} MD ${md} error: ${e.message}`);
         }
       }
+      try { await freshPage.close(); } catch (e) {}
     }
   } finally {
     await browser.close();
