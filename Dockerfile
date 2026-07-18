@@ -6,7 +6,7 @@ ENV NODE_ENV=production \
     DATA_DIR=/app/data
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
 COPY collector.mjs entrypoint.sh ./
 RUN chmod +x /app/entrypoint.sh && mkdir -p /app/data
