@@ -11,7 +11,7 @@ const COLLECT_LOG = path.join(DATA_DIR, 'collect_log.txt');
 
 const RESULTS_HEADER = 'season_id,matchday,league,home_team,away_team,ft_home,ft_away';
 const UPCOMING_HEADER = 'season_id,matchday,league,row,home_team,away_team';
-const PREDICTIONS_HEADER = 'season_id,matchday,league,row,home_team,away_team,market,pct';
+const PREDICTIONS_HEADER = 'season_id,matchday,league,row,home_team,away_team,market,pct,collected_at';
 
 const LEAGUES = [
   { name: 'English', leagueId: '7794' },
@@ -150,8 +150,8 @@ async function detectSeasonId(page) {
     }
   } catch (e) { log('Upcoming method error: ' + e.message); }
 
-  log('All methods failed, using fallback season 138444');
-  return '138444';
+  log('All methods failed, using fallback season 138445');
+  return '138445';
 }
 
 function extractMatchday(text) {
@@ -267,33 +267,13 @@ async function fetchPredictions() {
 
 async function savePredictions(predictions) {
   if (!currentSeasonId || !currentMatchday) return;
-  const { rows: existing } = readCSV(PREDICTIONS_CSV, PREDICTIONS_HEADER);
-  const keySet = new Set(existing.map(getPredictionKey));
-  let updated = 0, added = 0;
-
-  for (const p of predictions) {
-    const row = {
-      season_id: currentSeasonId,
-      matchday: currentMatchday,
-      league: p.league,
-      row: p.row,
-      home_team: p.team1,
-      away_team: p.team2,
-      market: p.market,
-      pct: p.pct
-    };
-    const key = getPredictionKey(row);
-    const existingIdx = existing.findIndex(r => getPredictionKey(r) === key);
-    if (existingIdx >= 0) {
-      existing[existingIdx] = row;
-      updated++;
-    } else {
-      existing.push(row);
-      added++;
-    }
-  }
-  writeCSV(PREDICTIONS_CSV, PREDICTIONS_HEADER, existing);
-  if (updated + added > 0) log(`Predictions: +${added} updated ${updated}`);
+  const now = new Date().toISOString();
+  const newRows = predictions.map(p =>
+    `${currentSeasonId},${currentMatchday},${p.league},${p.row},"${(p.team1 || '').replace(/"/g,'""')}","${(p.team2 || '').replace(/"/g,'""')}",${p.market},${p.pct},${now}`
+  );
+  const hn = !fs.existsSync(PREDICTIONS_CSV) || fs.readFileSync(PREDICTIONS_CSV, 'utf-8').trim().length === 0;
+  fs.appendFileSync(PREDICTIONS_CSV, (hn ? PREDICTIONS_HEADER + '\n' : '') + newRows.join('\n') + '\n');
+  log(`Predictions: +${newRows.length} rows saved`);
 }
 
 async function saveResults(liveResults) {

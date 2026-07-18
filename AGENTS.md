@@ -44,15 +44,17 @@ season_id,matchday,league,row,home_team,away_team
 
 ### `predictions.csv`
 ```
-season_id,matchday,league,row,home_team,away_team,market,pct
+season_id,matchday,league,row,home_team,away_team,market,pct,collected_at
 ```
 - `home_team` = `team1` from API (full name like "Brentford")
 - `away_team` = `team2` from API
+- `collected_at` = ISO timestamp when the prediction snapshot was fetched
+- **Every poll appends new rows** — predictions are NEVER overwritten, full history is preserved
 
 ## Season ID Strategy
 - **Derive from results tab** — on startup, navigate to `https://www.betpawa.co.tz/virtual-sports?virtualTab=results` and extract season_id from the season dropdown (`[data-test-id="auto-matches-results-select"] select`) or from page text/URL links.
 - **Fallback methods:** matchday/0 redirect, upcoming tab links.
-- **Last resort:** hardcoded fallback `138444`.
+- **Last resort:** hardcoded fallback `138445`.
 - This preserves CSV compatibility with existing consumers.
 
 ## Dedup + Update Rules
@@ -61,9 +63,10 @@ season_id,matchday,league,row,home_team,away_team,market,pct
 |---|---|---|
 | `results.csv` | `season_id + matchday + league + home_team + away_team` | Overwrite score |
 | `upcoming.csv` | `season_id + matchday + league + row` | Overwrite teams |
-| `predictions.csv` | `season_id + matchday + league + row + market` | Overwrite pct |
+| `predictions.csv` | **Always appends** — no dedup | Each 10s poll creates new rows with unique `collected_at` timestamp |
 
-All CSVs are **overwritten entirely** on each save (read → modify in memory → write).
+Results and upcoming CSVs are overwritten entirely on each save (read → modify in memory → write).
+Predictions CSV only grows — every snapshot stays forever.
 
 ## Execution Flow
 
@@ -112,7 +115,7 @@ Prediction polling (10s) is INDEPENDENT and NEVER skipped.
 
 ### CSV endpoint response shape (preserved):
 ```json
-{ "headers": [...], "rows": N, "offset": 0, "limit": 100, "page": [...] }
+{ "headers": ["season_id","matchday","league","row","home_team","away_team","market","pct","collected_at"], "rows": N, "offset": 0, "limit": 100, "page": [...] }
 ```
 Filters: `season_id`, `matchday`, `league` (optional query params).
 Sort: season_id DESC, matchday DESC.
