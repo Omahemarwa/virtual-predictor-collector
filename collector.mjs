@@ -228,6 +228,47 @@ async function scrapeBetPawa(page, seasonId) {
   return { liveResults, upcomingMatches };
 }
 
+async function scrapeHistoricalResults(page, seasonId) {
+  const results = [];
+  const latestSeason = parseInt(seasonId);
+  const startSeason = 138439;
+  log(`Historical results: scanning seasons ${startSeason} → ${latestSeason}`);
+
+  for (let sid = startSeason; sid <= latestSeason; sid++) {
+    const sidStr = String(sid);
+    let foundAny = false;
+    for (let md = 1; md <= 34; md++) {
+      let foundMD = false;
+      for (const { name: league, leagueId } of LEAGUES) {
+        let matches = [];
+        try {
+          await page.goto(`https://www.betpawa.co.tz/virtual-sports/matchday/${sidStr}?matchday=${md}&leagueId=${leagueId}`, {
+            waitUntil: 'domcontentloaded', timeout: 15000
+          });
+          await page.waitForTimeout(2000);
+          matches = parseMatchLines(await page.innerText('body'), true);
+        } catch (e) { continue; }
+        if (matches.length === 0) continue;
+        let row = 1;
+        for (const m of matches) {
+          results.push({
+            season_id: sidStr, matchday: md, league,
+            row: row++,
+            home_team: m.home, away_team: m.away,
+            ft_home: m.ft_home, ft_away: m.ft_away
+          });
+        }
+        foundMD = true;
+        foundAny = true;
+      }
+      if (!foundMD && md > 3) break;
+    }
+    if (foundAny) log(`  Season ${sid}: historical scrape done`);
+  }
+  log(`Historical results: ${results.length} total`);
+  return results;
+}
+
 async function fetchPredictions() {
   try {
     const resp = await fetch(DASHBOARD_URL);
@@ -252,12 +293,12 @@ async function savePredictions(predictions) {
   log(`Predictions: +${newRows.length} rows saved`);
 }
 
-async function saveResults(liveResults) {
+async function saveResults(rows) {
   if (!currentSeasonId || !currentMatchday) return;
   const { rows: existing } = readCSV(RESULTS_CSV, RESULTS_HEADER);
   let updated = 0, added = 0;
 
-  for (const r of liveResults) {
+  for (const r of rows) {
     const key = getSeasonMDKey(r);
     const existingIdx = existing.findIndex(x => getSeasonMDKey(x) === key);
     if (existingIdx >= 0) {
@@ -308,12 +349,16 @@ async function collectAll() {
   }
   log(`Season: ${currentSeasonId}`);
 
-  // Scrape live + upcoming
+  // Scrape live + upcoming + historical
   const { liveResults, upcomingMatches } = await scrapeBetPawa(page, currentSeasonId);
+  const historicalResults = await scrapeHistoricalResults(page, currentSeasonId);
   await browser.close();
 
+  // Merge live + historical results
+  const allResults = [...liveResults, ...historicalResults];
+
   // Save
-  await saveResults(liveResults);
+  await saveResults(allResults);
   await saveUpcoming(upcomingMatches);
 
   // Fetch predictions

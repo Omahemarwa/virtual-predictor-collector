@@ -16,9 +16,10 @@ Single Node.js service that:
 
 | Endpoint | What | How Often |
 |---|---|---|
-| `https://www.betpawa.co.tz/virtual-sports?virtualTab=results` | **Detect season ID** from dropdown or page content | Startup + every 5 min re-scan |
+| `https://www.betpawa.co.tz/virtual-sports?virtualTab=results&leagueId=7796&resultsTab=matches` | **Detect season ID** from dropdown | Startup + every 5 min re-scan |
 | `https://www.betpawa.co.tz/virtual-sports?virtualTab=upcoming` | **Upcoming matches** (team codes, no scores) | Startup + re-scan |
-| `https://www.betpawa.co.tz/virtual-sports?virtualTab=live` | **Current/recent results** — refreshed every ~5 min after timer ends | Startup + re-scan |
+| `https://www.betpawa.co.tz/virtual-sports?virtualTab=live` | **Current/recent results** — refreshed ~every 5 min | Startup + re-scan |
+| `https://www.betpawa.co.tz/virtual-sports/matchday/{seasonId}?matchday={md}&leagueId={leagueId}` | **Historical results** — seasons 138439→current, MD 1-34 | Startup + re-scan |
 | `https://virtualpredictor-production.up.railway.app/data` | **Predictions** for current matchday | Every **10 seconds** (lightweight HTTP) |
 
 **betPawa load order:**
@@ -73,11 +74,12 @@ Predictions CSV only grows — every snapshot stays forever.
 ```
 STARTUP:
   1. Start HTTP server
-  2. Detect season_id via `?virtualTab=results`
+  2. Detect season_id via `?virtualTab=results&leagueId=7796&resultsTab=matches`
   3. Load Upcoming tab → scrape upcoming matches
   4. Activate Live tab → scrape live results
-  5. Fetch predictions from API
-  6. Save all CSVs
+  5. **Scrape historical results** from `matchday/{seasonId}?matchday={md}&leagueId={leagueId}` — seasons 138439 through current, MD 1-34, English + Spanish
+  6. Fetch predictions from API
+  7. Save all CSVs
 
 EVERY 10 SECONDS (lightweight, no browser):
   1. HTTP GET predictions endpoint
