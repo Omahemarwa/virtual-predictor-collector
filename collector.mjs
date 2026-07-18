@@ -101,31 +101,22 @@ function parseMatchLines(text, hasScores) {
 }
 
 async function detectSeasonId(page) {
-  // Method 1: results tab to detect season from dropdown or page URL
+  // Method 1: results tab season dropdown (primary)
   try {
-    await page.goto('https://www.betpawa.co.tz/virtual-sports?virtualTab=results', {
+    await page.goto('https://www.betpawa.co.tz/virtual-sports?virtualTab=results&leagueId=7796&resultsTab=matches', {
       waitUntil: 'domcontentloaded', timeout: 20000
     });
-    await page.waitForTimeout(5000);
-    // Try extracting from season select dropdown
-    const seasons = await page.evaluate(() => {
-      const sel = document.querySelector('[data-test-id="auto-matches-results-select"] select');
-      if (!sel) return [];
-      return Array.from(sel.options).map(o => o.value);
+    await page.waitForTimeout(4000);
+    const sid = await page.evaluate(() => {
+      const selects = document.querySelectorAll('select');
+      for (const sel of selects) {
+        const opts = Array.from(sel.options);
+        if (opts.length && opts[0].value.match(/^\d{5,}$/)) return opts[0].value;
+      }
+      return null;
     });
-    if (seasons.length) return seasons[0];
-    // Try finding season in page text or URLs
-    const text = await page.innerText('body');
-    const m = text.match(/Season\s*(\d{5,})/i) || text.match(/(\d{5,})\s*[-–]\s*20/);
-    if (m) return m[1];
-    // Try all links
-    const hrefs = await page.evaluate(() => Array.from(document.querySelectorAll('a')).map(a => a.href));
-    for (const href of hrefs) {
-      const m2 = href.match(/\/matchday\/(\d{5,})/);
-      if (m2) return m2[1];
-    }
-    log(`Results tab gave no season`);
-  } catch (e) { log('Results tab error: ' + e.message); }
+    if (sid) { log(`Season detected: ${sid}`); return sid; }
+  } catch (e) { log('Season dropdown error: ' + e.message); }
 
   // Method 2: matchday/0 redirect
   try {
@@ -135,20 +126,7 @@ async function detectSeasonId(page) {
     await page.waitForTimeout(4000);
     const m = page.url().match(/\/matchday\/(\d{5,})/);
     if (m) return m[1];
-  } catch (e) { log('Redirect method error: ' + e.message); }
-
-  // Method 3: try upcoming tab and extract from links
-  try {
-    await page.goto('https://www.betpawa.co.tz/virtual-sports?virtualTab=upcoming', {
-      waitUntil: 'domcontentloaded', timeout: 20000
-    });
-    await page.waitForTimeout(4000);
-    const hrefs = await page.evaluate(() => Array.from(document.querySelectorAll('a')).map(a => a.href));
-    for (const href of hrefs) {
-      const m2 = href.match(/\/matchday\/(\d{5,})/);
-      if (m2) return m2[1];
-    }
-  } catch (e) { log('Upcoming method error: ' + e.message); }
+  } catch (e) { log('Redirect error: ' + e.message); }
 
   log('All methods failed, using fallback season 138445');
   return '138445';

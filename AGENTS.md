@@ -52,10 +52,9 @@ season_id,matchday,league,row,home_team,away_team,market,pct,collected_at
 - **Every poll appends new rows** — predictions are NEVER overwritten, full history is preserved
 
 ## Season ID Strategy
-- **Derive from results tab** — on startup, navigate to `https://www.betpawa.co.tz/virtual-sports?virtualTab=results` and extract season_id from the season dropdown (`[data-test-id="auto-matches-results-select"] select`) or from page text/URL links.
-- **Fallback methods:** matchday/0 redirect, upcoming tab links.
+- **Derive from results tab** — on startup, navigate to `https://www.betpawa.co.tz/virtual-sports?virtualTab=results&leagueId=7796&resultsTab=matches` and extract the first option value from the season `<select>` (find any `<select>` whose options have 5+ digit numeric values).
+- **Fallback:** matchday/0 redirect.
 - **Last resort:** hardcoded fallback `138445`.
-- This preserves CSV compatibility with existing consumers.
 
 ## Dedup + Update Rules
 
