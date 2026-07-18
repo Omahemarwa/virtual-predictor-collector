@@ -1,6 +1,17 @@
 {
+  "name": "virtual-predictor-collector",
+  "version": "1.0.0",
+  "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node collector.mjs --serve",
+    "collect": "node collector.mjs --once",
+    "check": "node --check collector.mjs"
+  },
   "dependencies": {
-    "playwright": "^1.52.0"
+    "playwright": "1.61.1"
   }
 }

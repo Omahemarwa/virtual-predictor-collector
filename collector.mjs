@@ -5,16 +5,24 @@ import http from 'http';
 
 const DATA_DIR = '/app/data';
 const RESULTS_CSV = path.join(DATA_DIR, 'results.csv');
+const UPCOMING_CSV = path.join(DATA_DIR, 'upcoming.csv');
 const PREDICTIONS_CSV = path.join(DATA_DIR, 'predictions.csv');
 const COLLECT_LOG = path.join(DATA_DIR, 'collect_log.txt');
 
 const RESULTS_HEADER = 'season_id,matchday,league,home_team,away_team,ft_home,ft_away';
+const UPCOMING_HEADER = 'season_id,matchday,league,row,home_team,away_team';
 const PREDICTIONS_HEADER = 'season_id,matchday,league,row,home_team,away_team,market,pct';
+
 const LEAGUES = [
   { name: 'English', leagueId: '7794' },
   { name: 'Spanish', leagueId: '7795' },
 ];
-const DASHBOARD_DATA_URL = 'https://virtualpredictor-production.up.railway.app/data';
+
+const DASHBOARD_URL = 'https://virtualpredictor-production.up.railway.app/data';
+
+let currentSeasonId = null;
+let currentMatchday = null;
+let rescanMutex = false;
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}`;
@@ -22,20 +30,69 @@ function log(msg) {
   try { fs.appendFileSync(COLLECT_LOG, line + '\n'); } catch (e) {}
 }
 
-function parseResultsFromText(text) {
+function readCSV(filePath, header) {
+  const rows = [];
+  const keySet = new Set();
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const lines = content.trim().split('\n');
+    if (lines.length <= 1) return { rows, keySet };
+    const headers = lines[0].split(',');
+    for (let i = 1; i < lines.length; i++) {
+      const vals = lines[i].split(',');
+      const obj = {};
+      headers.forEach((h, idx) => obj[h] = vals[idx] || '');
+      rows.push(obj);
+    }
+  } catch (e) {}
+  return { rows, keySet };
+}
+
+function writeCSV(filePath, header, rows) {
+  const lines = [header];
+  for (const row of rows) {
+    const vals = header.split(',').map(h => row[h] || '');
+    lines.push(vals.join(','));
+  }
+  fs.writeFileSync(filePath, lines.join('\n') + '\n');
+}
+
+function getResultKey(row) {
+  return `${row.season_id}-${row.matchday}-${row.league}-${row.home_team}-${row.away_team}`;
+}
+
+function getUpcomingKey(row) {
+  return `${row.season_id}-${row.matchday}-${row.league}-${row.row}`;
+}
+
+function getPredictionKey(row) {
+  return `${row.season_id}-${row.matchday}-${row.league}-${row.row}-${row.market}`;
+}
+
+function parseMatchLines(text, hasScores) {
   const matches = [];
   const lines = text.split('\n').map(l => l.trim()).filter(l => l);
   let i = 0;
   while (i < lines.length) {
-    const tm = lines[i].match(/^([A-Za-z0-9\s'-]+)\s*-\s*([A-Za-z0-9\s'-]+)$/);
-    if (tm && i + 1 < lines.length) {
-      const sc = lines[i + 1].match(/^\((\d+)\s*-\s*(\d+)\)(\d+)\s*-\s*(\d+)$/);
-      if (sc) {
-        matches.push({
-          home: tm[1].trim(), away: tm[2].trim(),
-          ft_home: parseInt(sc[3]), ft_away: parseInt(sc[4]),
-        });
-        i += 2; continue;
+    const teamMatch = lines[i].match(/^([A-Z]{3})\s*-\s*([A-Z]{3})$/);
+    if (teamMatch && i + 1 < lines.length) {
+      const home = teamMatch[1];
+      const away = teamMatch[2];
+      if (hasScores) {
+        const scoreMatch = lines[i + 1].match(/^\((\d+)\s*-\s*(\d+)\)(\d+)\s*-\s*(\d+)$/);
+        if (scoreMatch) {
+          matches.push({
+            home, away,
+            ft_home: parseInt(scoreMatch[3]),
+            ft_away: parseInt(scoreMatch[4])
+          });
+          i += 2;
+          continue;
+        }
+      } else {
+        matches.push({ home, away });
+        i++;
+        continue;
       }
     }
     i++;
@@ -43,37 +100,11 @@ function parseResultsFromText(text) {
   return matches;
 }
 
-function appendCSV(filePath, header, rows, existingKeys, keyFn) {
-  if (rows.length === 0) return;
-  const hn = !fs.existsSync(filePath) || fs.readFileSync(filePath, 'utf-8').trim().length === 0;
-  const newRows = rows.filter(r => {
-    const k = keyFn(r);
-    if (existingKeys.has(k)) return false;
-    existingKeys.add(k);
-    return true;
-  });
-  if (newRows.length === 0) return;
-  fs.appendFileSync(filePath, (hn ? header + '\n' : '') + newRows.join('\n') + '\n');
-}
-
-async function fetchPredictions() {
+async function detectSeasonId(page) {
   try {
-    const resp = await fetch(DASHBOARD_DATA_URL);
-    if (!resp.ok) { log(`Predictions fetch failed: HTTP ${resp.status}`); return []; }
-    const data = await resp.json();
-    if (!Array.isArray(data)) { log('Predictions: unexpected response format'); return []; }
-    log(`Fetched ${data.length} predictions from dashboard`);
-    return data;
-  } catch (e) {
-    log(`Predictions fetch error: ${e.message}`);
-    return [];
-  }
-}
-
-async function detectCurrentSeason(page) {
-  try {
-    await page.goto('https://www.betpawa.co.tz/virtual-sports/matchday/0?matchday=1&leagueId=7794',
-      { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.goto('https://www.betpawa.co.tz/virtual-sports/matchday/0?matchday=1&leagueId=7794', {
+      waitUntil: 'domcontentloaded', timeout: 15000
+    });
     await page.waitForTimeout(2000);
     const m = page.url().match(/\/matchday\/(\d{5,})/);
     if (m) return m[1];
@@ -81,115 +112,248 @@ async function detectCurrentSeason(page) {
   return null;
 }
 
-async function getAvailableSeasons(page) {
+function extractMatchday(text) {
+  const m = text.match(/Matchday\s*(\d+)/i);
+  if (m) return parseInt(m[1]);
+  return null;
+}
+
+async function scrapeBetPawa(page, seasonId) {
+  const liveResults = [];
+  const upcomingMatches = [];
+
+  // 1. Upcoming tab first (required for Live tab to render correctly)
   try {
-    await page.goto('https://www.betpawa.co.tz/virtual-sports?virtualTab=results&resultsTab=matches',
-      { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await page.waitForTimeout(3000);
-    const seasons = await page.evaluate(() => {
-      const sel = document.querySelector('[data-test-id="auto-matches-results-select"] select');
-      if (!sel) return [];
-      return Array.from(sel.options).map(o => o.value);
+    await page.goto('https://www.betpawa.co.tz/virtual-sports?virtualTab=upcoming', {
+      waitUntil: 'domcontentloaded', timeout: 20000
     });
-    return seasons;
-  } catch (e) { log('Season list error: ' + e.message); return []; }
+    await page.waitForTimeout(3000);
+  } catch (e) {
+    log('Upcoming tab load error: ' + e.message);
+  }
+
+  // 2. Get matchday from upcoming page
+  const pageText = await page.innerText('body');
+  const md = extractMatchday(pageText);
+  if (md) currentMatchday = md;
+
+  // 3. Scrape upcoming for each league
+  for (const { name: league, leagueId } of LEAGUES) {
+    try {
+      // Try clicking the league tab or using URL param
+      const leagueTab = await page.$(`[data-test-id*="${leagueId}"]`) || await page.$(`button:has-text("${league}")`) || await page.$(`a:has-text("${league}")`);
+      if (leagueTab) {
+        await leagueTab.click();
+        await page.waitForTimeout(1500);
+      }
+      const text = await page.innerText('body');
+      const matches = parseMatchLines(text, false);
+      let row = 1;
+      for (const m of matches) {
+        upcomingMatches.push({
+          season_id: seasonId,
+          matchday: currentMatchday || '',
+          league,
+          row: row++,
+          home_team: m.home,
+          away_team: m.away
+        });
+      }
+      log(`Upcoming ${league}: ${matches.length} matches`);
+    } catch (e) {
+      log(`Upcoming ${league} error: ${e.message}`);
+    }
+  }
+
+  // 4. Now activate Live tab
+  try {
+    const liveTab = await page.$('[data-test-id*="live"]') || await page.$('button:has-text("Live")') || await page.$('a:has-text("Live")');
+    if (liveTab) {
+      await liveTab.click();
+      await page.waitForTimeout(3000);
+    } else {
+      // Try direct navigation if tab click fails
+      await page.goto('https://www.betpawa.co.tz/virtual-sports?virtualTab=live', { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.waitForTimeout(3000);
+    }
+  } catch (e) {
+    log('Live tab activation error: ' + e.message);
+  }
+
+  // 5. Scrape live results for each league
+  for (const { name: league, leagueId } of LEAGUES) {
+    try {
+      const leagueTab = await page.$(`[data-test-id*="${leagueId}"]`) || await page.$(`button:has-text("${league}")`) || await page.$(`a:has-text("${league}")`);
+      if (leagueTab) {
+        await leagueTab.click();
+        await page.waitForTimeout(1500);
+      }
+      const text = await page.innerText('body');
+      const matches = parseMatchLines(text, true);
+      for (const m of matches) {
+        liveResults.push({
+          season_id: seasonId,
+          matchday: currentMatchday || '',
+          league,
+          home_team: m.home,
+          away_team: m.away,
+          ft_home: m.ft_home,
+          ft_away: m.ft_away
+        });
+      }
+      log(`Live ${league}: ${matches.length} results`);
+    } catch (e) {
+      log(`Live ${league} error: ${e.message}`);
+    }
+  }
+
+  return { liveResults, upcomingMatches };
+}
+
+async function fetchPredictions() {
+  try {
+    const resp = await fetch(DASHBOARD_URL);
+    if (!resp.ok) { log(`Predictions fetch failed: HTTP ${resp.status}`); return []; }
+    const data = await resp.json();
+    if (!Array.isArray(data)) { log('Predictions: unexpected response format'); return []; }
+    return data;
+  } catch (e) {
+    log(`Predictions fetch error: ${e.message}`);
+    return [];
+  }
+}
+
+async function savePredictions(predictions) {
+  if (!currentSeasonId || !currentMatchday) return;
+  const { rows: existing } = readCSV(PREDICTIONS_CSV, PREDICTIONS_HEADER);
+  const keySet = new Set(existing.map(getPredictionKey));
+  let updated = 0, added = 0;
+
+  for (const p of predictions) {
+    const row = {
+      season_id: currentSeasonId,
+      matchday: currentMatchday,
+      league: p.league,
+      row: p.row,
+      home_team: p.team1,
+      away_team: p.team2,
+      market: p.market,
+      pct: p.pct
+    };
+    const key = getPredictionKey(row);
+    const existingIdx = existing.findIndex(r => getPredictionKey(r) === key);
+    if (existingIdx >= 0) {
+      existing[existingIdx] = row;
+      updated++;
+    } else {
+      existing.push(row);
+      added++;
+    }
+  }
+  writeCSV(PREDICTIONS_CSV, PREDICTIONS_HEADER, existing);
+  if (updated + added > 0) log(`Predictions: +${added} updated ${updated}`);
+}
+
+async function saveResults(liveResults) {
+  if (!currentSeasonId || !currentMatchday) return;
+  const { rows: existing } = readCSV(RESULTS_CSV, RESULTS_HEADER);
+  let updated = 0, added = 0;
+
+  for (const r of liveResults) {
+    const key = getResultKey(r);
+    const existingIdx = existing.findIndex(x => getResultKey(x) === key);
+    if (existingIdx >= 0) {
+      existing[existingIdx] = r;
+      updated++;
+    } else {
+      existing.push(r);
+      added++;
+    }
+  }
+  writeCSV(RESULTS_CSV, RESULTS_HEADER, existing);
+  if (updated + added > 0) log(`Results: +${added} updated ${updated}`);
+}
+
+async function saveUpcoming(upcomingMatches) {
+  if (!currentSeasonId || !currentMatchday) return;
+  const { rows: existing } = readCSV(UPCOMING_CSV, UPCOMING_HEADER);
+  let updated = 0, added = 0;
+
+  for (const m of upcomingMatches) {
+    const key = getUpcomingKey(m);
+    const existingIdx = existing.findIndex(x => getUpcomingKey(x) === key);
+    if (existingIdx >= 0) {
+      existing[existingIdx] = m;
+      updated++;
+    } else {
+      existing.push(m);
+      added++;
+    }
+  }
+  writeCSV(UPCOMING_CSV, UPCOMING_HEADER, existing);
+  if (updated + added > 0) log(`Upcoming: +${added} updated ${updated}`);
 }
 
 async function collectAll() {
   try { fs.writeFileSync(COLLECT_LOG, ''); } catch (e) {}
-  log('=== AUTO COLLECTION START ===');
-
-  // Load existing data for dedup
-  const existingResults = new Set();
-  try {
-    const c = fs.readFileSync(RESULTS_CSV, 'utf-8');
-    c.trim().split('\n').slice(1).forEach(l => {
-      const p = l.split(',');
-      if (p.length >= 3) existingResults.add(`${p[0]}-${p[1]}-${p[2]}`);
-    });
-  } catch (e) {}
-  log(`Existing results: ${existingResults.size} entries`);
-
-  const existingPredictions = new Set();
-  try {
-    const c = fs.readFileSync(PREDICTIONS_CSV, 'utf-8');
-    c.trim().split('\n').slice(1).forEach(l => {
-      const p = l.split(',');
-      if (p.length >= 5) existingPredictions.add(`${p[0]}-${p[1]}-${p[2]}-${p[3]}-${p[4]}`);
-    });
-  } catch (e) {}
-  log(`Existing predictions: ${existingPredictions.size} entries`);
+  log('=== COLLECTION START ===');
 
   const browser = await firefox.launch({ headless: true });
   const page = await browser.newPage({ userAgent: 'Mozilla/5.0' });
 
-  // Detect current season
-  const currentSeason = await detectCurrentSeason(page);
-  if (!currentSeason) { log('FATAL: could not detect current season'); await browser.close(); return; }
-  log(`Current season: ${currentSeason}`);
-
-  // Get available seasons
-  const availableSeasons = await getAvailableSeasons(page);
-  if (availableSeasons.length === 0) {
-    log('No seasons available from betPawa, using current season only');
-    availableSeasons.push(currentSeason);
+  // Detect season
+  currentSeasonId = await detectSeasonId(page);
+  if (!currentSeasonId) {
+    log('FATAL: could not detect season');
+    await browser.close();
+    return;
   }
-  log(`Available seasons: ${availableSeasons[0]} → ${availableSeasons[availableSeasons.length - 1]} (${availableSeasons.length} seasons)`);
+  log(`Season: ${currentSeasonId}`);
 
-  // Collect results for each season
-  let totalResults = 0;
-  for (const sid of availableSeasons) {
-    let seasonTotal = 0;
-    for (let md = 1; md <= 34; md++) {
-      let foundAny = false;
-      for (const { name: league, leagueId: lid } of LEAGUES) {
-        const key = `${sid}-${md}-${league}`;
-        if (existingResults.has(key)) { foundAny = true; continue; }
-        let matches = [];
-        try {
-          await page.goto(`https://www.betpawa.co.tz/virtual-sports/matchday/${sid}?matchday=${md}&leagueId=${lid}`,
-            { waitUntil: 'domcontentloaded', timeout: 15000 });
-          await page.waitForTimeout(2000);
-          matches = parseResultsFromText(await page.innerText('body'));
-        } catch (e) {}
-        if (matches.length === 0) continue;
-        const newRows = matches.map(m => `${sid},${md},${league},${m.home},${m.away},${m.ft_home},${m.ft_away}`);
-        appendCSV(RESULTS_CSV, RESULTS_HEADER, newRows, existingResults, r => `${sid}-${md}-${league}`);
-        seasonTotal += matches.length;
-        totalResults += matches.length;
-        foundAny = true;
-        log(`  ${league} ${sid} MD ${md}: ${matches.length} results`);
-      }
-      if (!foundAny && md > 3) break;
-    }
-    if (seasonTotal > 0) log(`  Season ${sid}: +${seasonTotal} total`);
-  }
-  log(`Results collection done: ${totalResults} new rows`);
-
+  // Scrape live + upcoming
+  const { liveResults, upcomingMatches } = await scrapeBetPawa(page, currentSeasonId);
   await browser.close();
 
-  // Collect predictions
-  log('Fetching predictions...');
-  const predictions = await fetchPredictions();
-  if (predictions.length > 0) {
-    const newPredRows = predictions.map(p =>
-      `${p.season_id || p.seasonId || ''},${p.matchday || p.md || ''},${p.league || ''},${p.row || ''},"${(p.team1 || p.home_team || '').replace(/"/g,'""')}","${(p.team2 || p.away_team || '').replace(/"/g,'""')}",${p.market || ''},${p.pct || ''}`
-    );
-    appendCSV(PREDICTIONS_CSV, PREDICTIONS_HEADER, newPredRows, existingPredictions,
-      r => `${r.split(',')[0]}-${r.split(',')[1]}-${r.split(',')[2]}-${r.split(',')[3]}-${r.split(',')[6]}`
-    );
-    log(`Predictions: ${newPredRows.length} new rows`);
-  }
+  // Save
+  await saveResults(liveResults);
+  await saveUpcoming(upcomingMatches);
 
-  log(`=== COLLECTION COMPLETE: ${totalResults} results, ${predictions.length} predictions ===`);
+  // Fetch predictions
+  const predictions = await fetchPredictions();
+  await savePredictions(predictions);
+
+  log('=== COLLECTION COMPLETE ===');
 }
 
-// ─── HTTP Server ───
+function filterRows(rows, url) {
+  let data = [...rows];
+  if (url.searchParams.get('season_id')) data = data.filter(r => r.season_id === url.searchParams.get('season_id'));
+  if (url.searchParams.get('matchday')) data = data.filter(r => r.matchday === url.searchParams.get('matchday'));
+  if (url.searchParams.get('league')) data = data.filter(r => (r.league || '').toLowerCase() === url.searchParams.get('league').toLowerCase());
+  data.sort((a, b) => b.season_id.localeCompare(a.season_id, void 0, { numeric: true }) || b.matchday - a.matchday);
+  return data;
+}
+
+function csvEndpoint(filePath, header) {
+  return (req, res, url) => {
+    const { rows } = readCSV(filePath, header);
+    const filtered = filterRows(rows, url);
+    const offset = Math.max(0, parseInt(url.searchParams.get('offset')) || 0);
+    const limit = Math.min(Math.max(1, parseInt(url.searchParams.get('limit')) || 100), 500);
+    const page = filtered.slice(offset, offset + limit);
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ headers: header.split(','), rows: filtered.length, offset, limit, page }));
+  };
+}
+
 function startServer(port) {
+  const getResults = csvEndpoint(RESULTS_CSV, RESULTS_HEADER);
+  const getUpcoming = csvEndpoint(UPCOMING_CSV, UPCOMING_HEADER);
+  const getPredictions = csvEndpoint(PREDICTIONS_CSV, PREDICTIONS_HEADER);
+
   http.createServer((req, res) => {
     const url = new URL(req.url, `http://localhost:${port}`);
     const p = url.pathname;
-
     res.setHeader('Access-Control-Allow-Origin', '*');
 
     if (p === '/health') {
@@ -204,44 +368,13 @@ function startServer(port) {
       return;
     }
 
-    if (p.startsWith('/csv/')) {
-      const name = path.basename(p.slice(5));
-      const csvPath = path.join(DATA_DIR, name);
-      if (!name.endsWith('.csv') || !fs.existsSync(csvPath)) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ rows: 0, page: [] }));
-        return;
-      }
-      const content = fs.readFileSync(csvPath, 'utf-8');
-      const lines = content.trim().split('\n');
-      const headers = lines.length > 0 ? lines[0].split(',') : [];
-      let data = lines.length > 1 ? lines.slice(1).map(l => {
-        const vals = l.split(',');
-        const obj = {};
-        headers.forEach((h, i) => obj[h] = vals[i] || '');
-        return obj;
-      }) : [];
-
-      const fSeason = url.searchParams.get('season_id');
-      const fMD = url.searchParams.get('matchday');
-      const fLeague = url.searchParams.get('league');
-      if (fSeason) data = data.filter(r => r.season_id === fSeason);
-      if (fMD) data = data.filter(r => r.matchday === fMD);
-      if (fLeague) data = data.filter(r => (r.league || '').toLowerCase() === fLeague.toLowerCase());
-
-      data.sort((a, b) => b.season_id.localeCompare(a.season_id, void 0, { numeric: true }) || b.matchday - a.matchday);
-      const offset = Math.max(0, parseInt(url.searchParams.get('offset')) || 0);
-      const limit = Math.min(Math.max(1, parseInt(url.searchParams.get('limit')) || 100), 500);
-      const page = data.slice(offset, offset + limit);
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ headers, rows: data.length, offset, limit, page }));
-      return;
-    }
+    if (p === '/csv/results.csv') { getResults(req, res, url); return; }
+    if (p === '/csv/upcoming.csv') { getUpcoming(req, res, url); return; }
+    if (p === '/csv/predictions.csv') { getPredictions(req, res, url); return; }
 
     if (p === '/view' || p.startsWith('/view/')) {
       const name = p === '/view' ? '' : path.basename(p);
-      const valid = ['results', 'predictions'];
+      const valid = ['results', 'upcoming', 'predictions'];
       res.writeHead(200, { 'Content-Type': 'text/html' });
 
       if (!name) {
@@ -249,12 +382,12 @@ function startServer(port) {
         return;
       }
 
-      if (!valid.includes(name)) {
-        res.writeHead(302, { Location: '/view' }); res.end();
-        return;
-      }
+      if (!valid.includes(name)) { res.writeHead(302, { Location: '/view' }); res.end(); return; }
 
       const isResults = name === 'results';
+      const isUpcoming = name === 'upcoming';
+      const csvName = name + '.csv';
+
       res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${name.charAt(0).toUpperCase() + name.slice(1)}</title><style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;font-size:13px}
@@ -282,11 +415,11 @@ tr:hover td{background:#161b22}
 .log-body{font-family:monospace;font-size:11px;color:#8b949e;padding:8px 12px;white-space:pre-wrap;line-height:1.6}
 </style></head><body>
 <div class="nav"><h2>${name.charAt(0).toUpperCase() + name.slice(1)}</h2><a href="/view">Tables</a></div>
-${isResults ? '<div class="filters"><input id="fSeason" placeholder="Season" size="8"><input id="fMD" placeholder="MD" size="4"><select id="fLeague"><option value="">All</option><option value="English">English</option><option value="Spanish">Spanish</option></select><button class="btn" onclick="applyF()">Apply</button><span class="clear" onclick="clearF()">Clear</span></div><div class="log-panel" id="logPanel"><div class="log-header">Collection Log</div><div class="log-body" id="logBody">Auto-collecting...</div></div>' : ''}
+${(isResults || isUpcoming) ? '<div class="filters"><input id="fSeason" placeholder="Season" size="8"><input id="fMD" placeholder="MD" size="4"><select id="fLeague"><option value="">All</option><option value="English">English</option><option value="Spanish">Spanish</option></select><button class="btn" onclick="applyF()">Apply</button><span class="clear" onclick="clearF()">Clear</span></div><div class="log-panel" id="logPanel"><div class="log-header">Collection Log</div><div class="log-body" id="logBody">Waiting for logs...</div></div>' : ''}
 <div class="stats" id="stats">Loading...</div>
 <div class="wrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
 <script>
-var csv='${name}.csv',off=0,lim=100;
+var csv='${csvName}',off=0,lim=100;
 function qs(){var s=location.search.substring(1),o={};s.split('&').forEach(function(p){var kv=p.split('=');if(kv[0])o[kv[0]]=decodeURIComponent(kv[1]||'')});return o}
 var params=qs();
 function applyF(){
@@ -316,28 +449,39 @@ function load(o){off=o;
   }).catch(function(){document.getElementById('stats').textContent='Error'})}
 if(document.getElementById('fSeason')){document.getElementById('fSeason').value=params.season_id||'';document.getElementById('fMD').value=params.matchday||'';document.getElementById('fLeague').value=params.league||''}
 load(0);
-${isResults ? 'setInterval(function(){fetch("/collect-log").then(function(r){return r.text()}).then(function(t){if(t){var b=document.getElementById("logBody");b.textContent=t;b.scrollTop=b.scrollHeight;document.getElementById("logPanel").classList.add("show")}}).catch(function(){})},2000);' : ''}
+${(isResults || isUpcoming) ? 'setInterval(function(){fetch("/collect-log").then(function(r){return r.text()}).then(function(t){if(t){var b=document.getElementById("logBody");b.textContent=t;b.scrollTop=b.scrollHeight;document.getElementById("logPanel").classList.add("show")}}).catch(function(){})},2000);' : ''}
 </script></body></html>`);
       return;
     }
 
     res.writeHead(404); res.end('Not found');
   }).listen(port, () => {
-    console.log(`Server running on port ${port}`);
-    console.log(`  /health  /view  /csv/results.csv  /csv/predictions.csv  /collect-log`);
+    log(`Server running on port ${port}`);
   });
 }
 
-// ─── Startup ───
+// ─── Main ───
 const args = process.argv.slice(2);
 if (args.includes('--serve')) {
   const idx = args.indexOf('--serve');
   const port = parseInt(process.env.PORT || args[idx + 1] || '3000', 10);
   startServer(port);
-  // Auto-collect immediately on startup
+
+  // Initial collect
   collectAll().catch(e => log('Collect error: ' + e.message));
-  // Re-collect every 5 minutes
-  setInterval(() => collectAll().catch(e => log('Collect error: ' + e.message)), 300000);
+
+  // 10-second prediction polling
+  setInterval(async () => {
+    const predictions = await fetchPredictions();
+    if (predictions.length > 0) await savePredictions(predictions);
+  }, 10000);
+
+  // 5-minute full re-scan with mutex
+  setInterval(() => {
+    if (rescanMutex) { log('Re-scan skipped (mutex)'); return; }
+    rescanMutex = true;
+    collectAll().catch(e => log('Collect error: ' + e.message)).finally(() => { rescanMutex = false; });
+  }, 300000);
 } else {
   collectAll().catch(e => { console.error(e); process.exit(1); });
 }

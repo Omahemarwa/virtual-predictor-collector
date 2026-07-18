@@ -2,7 +2,8 @@
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
-[[service]]
-name = "web"
-startCommand = "/entrypoint.sh node collector.mjs --serve"
-port = 8080
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
